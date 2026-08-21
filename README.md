@@ -6,6 +6,36 @@ A single-purpose disk and partition utility script ([`disk_tool.py`](disk_tool.p
 
 ---
 
+---
+
+## How it works
+
+```mermaid
+flowchart TD
+    Start([Start]) --> Check[1. Check & install requirements]
+    Check -->|missing tools found| Install[Install parted / cloud-guest-utils]
+    Install --> Menu
+    Check -->|all tools present| Menu
+
+    Menu[Main Menu] --> List[2. List partitions]
+    Menu --> Delete[3. Delete partition]
+    Menu --> SwapOff[4. Disable swap]
+    Menu --> SwapFile[5. Create swap file]
+    Menu --> Resize[6. Resize partition]
+    Menu --> CreatePart[7. Create partition]
+
+    List --> Menu
+    Delete --> Menu
+    SwapOff --> Menu
+    SwapFile --> Menu
+    Resize --> Menu
+    CreatePart --> Menu
+
+    Menu -->|exit| End([End])
+```
+
+---
+
 ## Requirements
 
 The script relies on a few OS-level utilities in addition to the standard Python library. The first menu option checks for these dependencies and installs any that are missing.
@@ -94,36 +124,6 @@ Creates a new partition on a selected disk:
 sudo parted /dev/sda
 mkpart primary ext4 1MiB 10GiB
 ```
-
----
-
-## How it works
-
-```mermaid
-flowchart TD
-    Start([Start]) --> Check[1. Check & install requirements]
-    Check -->|missing tools found| Install[Install parted / cloud-guest-utils]
-    Install --> Menu
-    Check -->|all tools present| Menu
-
-    Menu[Main Menu] --> List[2. List partitions]
-    Menu --> Delete[3. Delete partition]
-    Menu --> SwapOff[4. Disable swap]
-    Menu --> SwapFile[5. Create swap file]
-    Menu --> Resize[6. Resize partition]
-    Menu --> CreatePart[7. Create partition]
-
-    List --> Menu
-    Delete --> Menu
-    SwapOff --> Menu
-    SwapFile --> Menu
-    Resize --> Menu
-    CreatePart --> Menu
-
-    Menu -->|exit| End([End])
-```
-
----
 
 ## Safety notes
 
