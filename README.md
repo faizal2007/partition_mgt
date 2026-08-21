@@ -45,7 +45,6 @@ The script relies on a few OS-level utilities in addition to the standard Python
 | Tool | Purpose |
 |------|---------|
 | `parted` | Partition table inspection, deletion, and resizing |
-| `cloud-guest-utils` | Guest utilities (e.g. `growpart`) used to expand partitions to the full available disk |
 
 ### Python
 
