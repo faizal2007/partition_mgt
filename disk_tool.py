@@ -10,6 +10,7 @@ Wraps common partition, swap, and filesystem administration tasks:
     5. Create swap file
     6. Resize partition
     7. Create partition
+    8. Auto resize root partition to 100% of disk
 
 Standard-library Python 3 only. Requires `parted` (and uses `lsblk`,
 `fallocate`, `mkswap`, `swapon`, `swapoff` from util-linux).
@@ -31,7 +32,10 @@ import sys
 
 REQUIRED_TOOLS = ["parted"]
 # Used by individual features; part of util-linux on most systems.
-OPTIONAL_TOOLS = ["lsblk", "fallocate", "mkswap", "swapon", "swapoff"]
+OPTIONAL_TOOLS = [
+    "lsblk", "fallocate", "mkswap", "swapon", "swapoff",
+    "partprobe", "resize2fs", "xfs_growfs", "btrfs",
+]
 
 MIB = 1024 ** 2
 
@@ -542,6 +546,171 @@ def create_partition():
         print(f"  {device} formatted as {fstype}.")
 
 
+def find_root_partition():
+    """Locate the root (/) partition and its parent disk.
+
+    Works for any disk naming scheme (/dev/sda, /dev/vda, /dev/nvme0n1,
+    /dev/mmcblk0, ...). Returns a tuple
+    (disk_name, disk_size_bytes, device_path, fstype) or None when `/` is
+    not backed directly by a partition (e.g. LVM/RAID).
+    """
+    proc = run(["lsblk", "--json", "--bytes",
+                "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,PATH"])
+    data = json.loads(proc.stdout or "{}")
+
+    def first_match(predicate):
+        for disk in data.get("blockdevices", []):
+            if disk.get("type") != "disk":
+                continue
+            for child in disk.get("children", []) or []:
+                if child.get("type") != "part":
+                    continue
+                if predicate(child):
+                    return (
+                        disk.get("name"),
+                        disk.get("size"),
+                        child.get("path"),
+                        child.get("fstype"),
+                    )
+        return None
+
+    # Preferred: a partition directly reports the root mountpoint.
+    result = first_match(lambda child: child.get("mountpoint") == "/")
+    if result:
+        return result
+
+    # Fallback: resolve the source device of `/` from /proc/mounts and match it
+    # by device path (covers setups where lsblk does not report the mountpoint
+    # on the partition itself).
+    root_device = None
+    try:
+        with open("/proc/mounts", encoding="utf-8") as fh:
+            for line in fh:
+                fields = line.split()
+                if len(fields) >= 2 and fields[1] == "/":
+                    root_device = fields[0]
+                    break
+    except OSError:
+        root_device = None
+
+    if root_device:
+        return first_match(lambda child: child.get("path") == root_device)
+    return None
+
+
+def partition_number(disk_name, device):
+    """Extract a partition number from a device path relative to its disk.
+
+    Handles plain names (/dev/vda1 -> 1, /dev/sda2 -> 2) and names that use a
+    separator (/dev/nvme0n1p2 -> 2, /dev/mmcblk0p1 -> 1).
+    """
+    base = os.path.basename(device)
+    suffix = base[len(disk_name):]
+    match = re.fullmatch(r"p?(\d+)", suffix)
+    return int(match.group(1)) if match else None
+
+
+def grow_filesystem(device, fstype, mount="/"):
+    """Grow the filesystem on `device` after its partition was enlarged."""
+    fstype = (fstype or "").lower()
+    try:
+        if fstype in ("ext2", "ext3", "ext4"):
+            if not shutil.which("resize2fs"):
+                print("  [!] `resize2fs` not found; grow the filesystem manually.")
+                return
+            run(elevated(["resize2fs", device]))
+            print("  Filesystem grown with resize2fs.")
+        elif fstype == "xfs":
+            if not shutil.which("xfs_growfs"):
+                print("  [!] `xfs_growfs` not found; grow the filesystem manually.")
+                return
+            run(elevated(["xfs_growfs", mount]))
+            print("  Filesystem grown with xfs_growfs.")
+        elif fstype == "btrfs":
+            if not shutil.which("btrfs"):
+                print("  [!] `btrfs` not found; grow the filesystem manually.")
+                return
+            run(elevated(["btrfs", "filesystem", "resize", "max", mount]))
+            print("  Filesystem grown with btrfs filesystem resize.")
+        else:
+            print(f"  [i] Unknown filesystem type '{fstype or '-'}'.")
+            print("       Resize the filesystem manually to use the new space.")
+    except RuntimeError as exc:
+        print(f"  [!] Filesystem resize failed: {exc}")
+
+
+def resize_root_to_full_disk():
+    section("Auto resize root partition to 100% of disk")
+    try:
+        result = find_root_partition()
+    except RuntimeError as exc:
+        print(f"  [!] {exc}")
+        return
+
+    if result is None:
+        print("  [!] Could not find a root (/) partition on a plain disk.")
+        print("       Root may be on LVM, RAID, or another device type;")
+        print("       this option only handles a root partition on a disk.")
+        return
+
+    disk_name, disk_size, device, fstype = result
+    disk = f"/dev/{disk_name}"
+    print(f"  Root partition : {device}")
+    print(f"  Disk           : {disk} ({human_size(disk_size)})")
+
+    try:
+        partitions = parted_partitions(disk)
+    except RuntimeError as exc:
+        print(f"  [!] {exc}")
+        return
+    if not partitions:
+        print("  [!] No partitions reported by parted.")
+        return
+
+    # Match the root device path to a partition number (handles vda1, sda2,
+    # nvme0n1p2, mmcblk0p1, ...).
+    root_num = partition_number(disk_name, device)
+    if root_num is None or not any(p["num"] == root_num for p in partitions):
+        print("  [!] Could not match the root device to a partition number.")
+        return
+
+    root_part = next(p for p in partitions if p["num"] == root_num)
+    print(f"  Partition      : {root_num}  current size {human_size(root_part['size'])}"
+          f"  fstype {fstype or '-'}")
+
+    last_end = max(p["end"] for p in partitions)
+    if root_part["end"] < last_end:
+        print(f"  [!] Partition {root_num} is not the last partition on {disk}.")
+        print("       Growing it to 100% would overwrite later partitions.")
+        return
+
+    free_bytes = disk_size - root_part["end"]
+    if free_bytes < MIB:
+        print("  [i] Root partition already spans (nearly) the whole disk.")
+        return
+    print(f"  Free space after partition: {human_size(free_bytes)}")
+
+    print("  WARNING: resizing the root partition can cause data loss.")
+    if not confirm(f"Resize partition {root_num} on {disk} to 100%?"):
+        print("  Aborted.")
+        return
+
+    try:
+        run_parted(disk, ["resizepart", str(root_num), "100%"])
+    except RuntimeError as exc:
+        print(f"  [!] {exc}")
+        return
+    print(f"  Partition {root_num} resized to 100% of {disk}.")
+
+    if shutil.which("partprobe"):
+        try:
+            run(elevated(["partprobe", disk]))
+        except RuntimeError as exc:
+            print(f"  [i] partprobe failed (continuing): {exc}")
+
+    grow_filesystem(device, fstype)
+
+
 # ---------------------------------------------------------------------------
 # Menu
 # ---------------------------------------------------------------------------
@@ -554,6 +723,7 @@ MENU_OPTIONS = [
     ("5", "Create swap file", create_swap_file),
     ("6", "Resize partition", resize_partition),
     ("7", "Create partition", create_partition),
+    ("8", "Auto resize root partition to 100% of disk", resize_root_to_full_disk),
 ]
 
 

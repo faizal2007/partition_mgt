@@ -23,6 +23,7 @@ flowchart TD
     Menu --> SwapFile[5. Create swap file]
     Menu --> Resize[6. Resize partition]
     Menu --> CreatePart[7. Create partition]
+    Menu --> RootResize[8. Auto resize root partition]
 
     List --> Menu
     Delete --> Menu
@@ -30,6 +31,7 @@ flowchart TD
     SwapFile --> Menu
     Resize --> Menu
     CreatePart --> Menu
+    RootResize --> Menu
 
     Menu -->|exit| End([End])
 ```
@@ -123,6 +125,24 @@ Creates a new partition on a selected disk:
 sudo parted /dev/sda
 mkpart primary ext4 1MiB 10GiB
 ```
+
+### 8. Auto resize root partition to 100% of disk
+
+Automatically detects the root (`/`) partition, then grows it to fill the
+remaining space on its disk and resizes the filesystem:
+
+- Locates the partition mounted at `/` and the disk it lives on.
+- Refuses to proceed if `/` is not the last partition on the disk (growing it
+  would overwrite later partitions).
+- Resizes the partition with `parted resizepart <num> 100%`.
+- Grows the filesystem according to its type:
+  - `ext2`/`ext3`/`ext4` → `resize2fs`
+  - `xfs` → `xfs_growfs /`
+  - `btrfs` → `btrfs filesystem resize max /`
+
+> **Note:** This option only supports a root partition directly on a disk
+> (e.g. `/dev/sda1`, `/dev/vda1`, `/dev/nvme0n1p2`). Root on LVM, RAID, or
+> other device types is not handled.
 
 ## Safety notes
 
